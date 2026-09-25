@@ -1,30 +1,11 @@
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO
 import requests
-import websocket
 import threading
-import json
 import time
 import os
 
 app = Flask(__name__)
-
-# Production startup: Gunicorn imports app.py, so initialize market data here.
-_started = False
-_start_lock = threading.Lock()
-
-def start_market_engine():
-    global _started
-    with _start_lock:
-        if _started:
-            return
-        _started = True
-
-        print("[STARTUP] Loading Binance market history...", flush=True)
-        load_history()
-
-        print("[STARTUP] Starting Binance WebSocket...", flush=True)
-        threading.Thread(target=websocket_loop, daemon=True).start()
 
 socketio = SocketIO(
     app,
@@ -36,8 +17,8 @@ SYMBOL = "BTCUSDT"
 INTERVAL = "1m"
 
 candles = []
-ws = None
-ws_lock = threading.Lock()
+engine_started = False
+engine_lock = threading.Lock()
 
 ALLOWED_SYMBOLS = {
     "BTCUSDT",
@@ -63,44 +44,43 @@ def load_history(symbol):
     global candles
 
     try:
-        url = "https://api.binance.com/api/v3/klines"
-
         response = requests.get(
-            url,
+            "https://api.binance.com/api/v3/klines",
             params={
                 "symbol": symbol,
                 "interval": INTERVAL,
-                "limit": 100
+                "limit": 200
             },
             timeout=15
         )
 
         response.raise_for_status()
-
         data = response.json()
 
         if not isinstance(data, list):
-            raise Exception(f"Unexpected Binance response: {data}")
+            raise Exception("Invalid Binance response")
 
-        candles = [
-            {
+        new_candles = []
+
+        for x in data:
+            new_candles.append({
                 "time": int(x[0]),
                 "open": float(x[1]),
                 "high": float(x[2]),
                 "low": float(x[3]),
                 "close": float(x[4]),
                 "volume": float(x[5])
-            }
-            for x in data
-        ]
+            })
+
+        candles = new_candles
 
         print(
-            f"[HISTORY] Loaded {len(candles)} candles for {symbol}",
+            f"[HISTORY] {symbol}: {len(candles)} candles loaded",
             flush=True
         )
 
         send_chat(
-            f"{symbol} • Loaded {len(candles)} historical candles"
+            f"{symbol} • {len(candles)} candles loaded"
         )
 
         return True
@@ -166,148 +146,125 @@ def send_state():
 
     payload = {
         "symbol": SYMBOL,
-        "candles": candles[-100:],
+        "candles": candles,
         "signal": result["signal"],
         "reason": result["reason"]
     }
 
-    print(
-        f"[STATE] {SYMBOL} candles={len(candles)} "
-        f"signal={result['signal']}",
-        flush=True
-    )
-
     socketio.emit("market_data", payload)
 
 
-def on_message(ws_app, message):
+def update_live_candle():
     global candles
 
     try:
-        data = json.loads(message)
+        response = requests.get(
+            "https://api.binance.com/api/v3/klines",
+            params={
+                "symbol": SYMBOL,
+                "interval": INTERVAL,
+                "limit": 2
+            },
+            timeout=10
+        )
 
-        k = data.get("k")
+        response.raise_for_status()
+        data = response.json()
 
-        if not k:
+        if not data:
             return
 
-        candle = {
-            "time": int(k["t"]),
-            "open": float(k["o"]),
-            "high": float(k["h"]),
-            "low": float(k["l"]),
-            "close": float(k["c"]),
-            "volume": float(k["v"])
-        }
+        for x in data:
+            candle = {
+                "time": int(x[0]),
+                "open": float(x[1]),
+                "high": float(x[2]),
+                "low": float(x[3]),
+                "close": float(x[4]),
+                "volume": float(x[5])
+            }
 
-        if candles and candles[-1]["time"] == candle["time"]:
-            candles[-1] = candle
-        else:
-            candles.append(candle)
+            if candles and candles[-1]["time"] == candle["time"]:
+                candles[-1] = candle
 
-        if len(candles) > 100:
-            candles = candles[-100:]
+            elif not candles or candle["time"] > candles[-1]["time"]:
+                candles.append(candle)
+
+                print(
+                    f"[NEW CANDLE] {SYMBOL} "
+                    f"{candle['open']} → {candle['close']}",
+                    flush=True
+                )
+
+                result = analyse()
+
+                send_chat(
+                    f"{SYMBOL} • New candle • "
+                    f"{result['signal']} • {result['reason']}"
+                )
+
+        # Keep a large history so the chart can continue moving forward.
+        if len(candles) > 1000:
+            candles = candles[-1000:]
 
         send_state()
 
-        if k["x"]:
-            result = analyse()
-
-            send_chat(
-                f"{SYMBOL} • Candle closed • "
-                f"{result['signal']} • {result['reason']}"
-            )
-
     except Exception as e:
-        print("[MESSAGE ERROR]", repr(e), flush=True)
+        print("[LIVE DATA ERROR]", repr(e), flush=True)
 
 
-def on_error(ws_app, error):
-    print("[BINANCE WS ERROR]", repr(error), flush=True)
-    send_chat(f"{SYMBOL} • Binance WebSocket error: {error}")
+def market_engine():
+    global SYMBOL
 
-
-def on_close(ws_app, code, message):
-    print(
-        f"[BINANCE WS CLOSED] code={code} message={message}",
-        flush=True
-    )
-
-    send_chat(f"{SYMBOL} • Binance stream disconnected")
-
-
-def on_open(ws_app):
-    print(
-        f"[BINANCE WS CONNECTED] {SYMBOL}",
-        flush=True
-    )
-
-    send_chat(f"{SYMBOL} • Binance live WebSocket connected")
-
-    send_state()
-
-
-def websocket_loop():
-    global ws
+    print("[ENGINE] Live market engine started", flush=True)
 
     while True:
         try:
-            symbol = SYMBOL.lower()
-
-            url = (
-                "wss://stream.binance.com:9443/ws/"
-                f"{symbol}@kline_{INTERVAL}"
-            )
-
-            print(
-                f"[BINANCE CONNECTING] {url}",
-                flush=True
-            )
-
-            ws = websocket.WebSocketApp(
-                url,
-                on_open=on_open,
-                on_message=on_message,
-                on_error=on_error,
-                on_close=on_close
-            )
-
-            ws.run_forever(
-                ping_interval=20,
-                ping_timeout=10
-            )
-
+            update_live_candle()
         except Exception as e:
-            print(
-                "[WEBSOCKET LOOP ERROR]",
-                repr(e),
-                flush=True
-            )
+            print("[ENGINE ERROR]", repr(e), flush=True)
 
-            send_chat(
-                f"{SYMBOL} • WebSocket reconnecting..."
-            )
-
-        time.sleep(5)
+        time.sleep(2)
 
 
-\n@app.before_request
-def ensure_market_engine():
-    start_market_engine()
-\n@app.route("/")
+def start_engine():
+    global engine_started
+
+    with engine_lock:
+        if engine_started:
+            return
+
+        engine_started = True
+
+        print("[STARTUP] Loading market history...", flush=True)
+        load_history(SYMBOL)
+
+        print("[STARTUP] Starting live candle engine...", flush=True)
+
+        thread = threading.Thread(
+            target=market_engine,
+            daemon=True
+        )
+
+        thread.start()
+
+
+@app.before_request
+def ensure_engine():
+    start_engine()
+
+
+@app.route("/")
 def home():
     return render_template("index.html")
 
 
 @app.route("/select", methods=["POST"])
 def select_market():
-    global SYMBOL, ws
+    global SYMBOL
 
     data = request.get_json(silent=True) or {}
-
-    new_symbol = str(
-        data.get("symbol", "")
-    ).upper()
+    new_symbol = str(data.get("symbol", "")).upper()
 
     if new_symbol not in ALLOWED_SYMBOLS:
         return jsonify({
@@ -317,11 +274,10 @@ def select_market():
 
     SYMBOL = new_symbol
 
-    try:
-        if ws:
-            ws.close()
-    except Exception:
-        pass
+    print(
+        f"[MARKET] Changed to {SYMBOL}",
+        flush=True
+    )
 
     load_history(SYMBOL)
     send_state()
@@ -348,27 +304,6 @@ def handle_connect():
     send_state()
 
 
-if __name__ == "__main__":
-    print("[SERVER] Starting Live Trading Bot", flush=True)
-
-    load_history(SYMBOL)
-
-    threading.Thread(
-        target=websocket_loop,
-        daemon=True
-    ).start()
-
-    port = int(
-        os.environ.get("PORT", 5000)
-    )
-
-    socketio.run(
-        app,
-        host="0.0.0.0",
-        port=port,
-        allow_unsafe_werkzeug=True
-    )
-
 @app.route("/debug")
 def debug():
     result = {
@@ -378,7 +313,6 @@ def debug():
         "analysis": analyse()
     }
 
-    # Direct Binance REST diagnostic
     try:
         r = requests.get(
             "https://api.binance.com/api/v3/klines",
@@ -396,7 +330,9 @@ def debug():
         if r.status_code == 200:
             data = r.json()
             result["binance_candles"] = len(data)
-            result["binance_last_close"] = data[-1][4] if data else None
+            result["binance_last_close"] = (
+                data[-1][4] if data else None
+            )
         else:
             result["binance_response"] = r.text[:500]
 
@@ -405,3 +341,16 @@ def debug():
         result["binance_error"] = str(e)
 
     return jsonify(result)
+
+
+if __name__ == "__main__":
+    start_engine()
+
+    port = int(os.environ.get("PORT", 5000))
+
+    socketio.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        allow_unsafe_werkzeug=True
+    )
