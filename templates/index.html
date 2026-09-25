@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport"
+      content="width=device-width,initial-scale=1.0">
+
+<title>Live Trading Bot</title>
+
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+
+<link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+
+<header>
+    <div>
+        <b>⚡ LIVE TRADING BOT</b>
+        <small id="connection">Connecting...</small>
+    </div>
+</header>
+
+<main>
+
+    <section class="topbar">
+
+        <select id="market">
+            <option value="BTCUSDT">BTC / USDT</option>
+            <option value="ETHUSDT">ETH / USDT</option>
+            <option value="SOLUSDT">SOL / USDT</option>
+            <option value="BNBUSDT">BNB / USDT</option>
+            <option value="XRPUSDT">XRP / USDT</option>
+            <option value="DOGEUSDT">DOGE / USDT</option>
+            <option value="ADAUSDT">ADA / USDT</option>
+        </select>
+
+        <div class="pricebox">
+            <span id="symbol">BTCUSDT</span>
+            <strong id="price">--</strong>
+        </div>
+
+        <div id="signal" class="neutral">
+            WAIT
+        </div>
+
+    </section>
+
+    <section class="chart-card">
+
+        <div class="chart-header">
+            <span>Live Candlestick Chart</span>
+            <span id="analysis">
+                Waiting for analysis...
+            </span>
+        </div>
+
+        <div id="chart"></div>
+
+    </section>
+
+    <section class="chat-card">
+
+        <div class="chat-title">
+            🤖 Live Trading Chat
+        </div>
+
+        <div id="messages"></div>
+
+    </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+
+</body>
+</html>
