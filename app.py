@@ -8,6 +8,24 @@ import time
 import os
 
 app = Flask(__name__)
+
+# Production startup: Gunicorn imports app.py, so initialize market data here.
+_started = False
+_start_lock = threading.Lock()
+
+def start_market_engine():
+    global _started
+    with _start_lock:
+        if _started:
+            return
+        _started = True
+
+        print("[STARTUP] Loading Binance market history...", flush=True)
+        load_history()
+
+        print("[STARTUP] Starting Binance WebSocket...", flush=True)
+        threading.Thread(target=websocket_loop, daemon=True).start()
+
 socketio = SocketIO(
     app,
     cors_allowed_origins="*",
@@ -273,7 +291,10 @@ def websocket_loop():
         time.sleep(5)
 
 
-@app.route("/")
+\n@app.before_request
+def ensure_market_engine():
+    start_market_engine()
+\n@app.route("/")
 def home():
     return render_template("index.html")
 
