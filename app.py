@@ -347,3 +347,12 @@ if __name__ == "__main__":
         port=port,
         allow_unsafe_werkzeug=True
     )
+
+@app.route("/debug")
+def debug():
+    return jsonify({
+        "symbol": SYMBOL,
+        "candles": len(candles),
+        "last_candle": candles[-1] if candles else None,
+        "analysis": analyse()
+    })
