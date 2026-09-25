@@ -1,0 +1,5 @@
+venv/
+__pycache__/
+app_backup.py
+static_backup/
+templates_backup/
