@@ -371,9 +371,37 @@ if __name__ == "__main__":
 
 @app.route("/debug")
 def debug():
-    return jsonify({
+    result = {
         "symbol": SYMBOL,
         "candles": len(candles),
         "last_candle": candles[-1] if candles else None,
         "analysis": analyse()
-    })
+    }
+
+    # Direct Binance REST diagnostic
+    try:
+        r = requests.get(
+            "https://api.binance.com/api/v3/klines",
+            params={
+                "symbol": SYMBOL,
+                "interval": INTERVAL,
+                "limit": 5
+            },
+            timeout=15
+        )
+
+        result["binance_status"] = r.status_code
+        result["binance_ok"] = r.status_code == 200
+
+        if r.status_code == 200:
+            data = r.json()
+            result["binance_candles"] = len(data)
+            result["binance_last_close"] = data[-1][4] if data else None
+        else:
+            result["binance_response"] = r.text[:500]
+
+    except Exception as e:
+        result["binance_ok"] = False
+        result["binance_error"] = str(e)
+
+    return jsonify(result)
