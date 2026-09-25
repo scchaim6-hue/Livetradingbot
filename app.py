@@ -8,7 +8,11 @@ import time
 import os
 
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode="threading"
+)
 
 SYMBOL = "BTCUSDT"
 INTERVAL = "1m"
@@ -28,22 +32,37 @@ ALLOWED_SYMBOLS = {
 }
 
 
+def send_chat(message):
+    print("[CHAT]", message, flush=True)
+
+    socketio.emit("trading_chat", {
+        "time": int(time.time() * 1000),
+        "message": message
+    })
+
+
 def load_history(symbol):
     global candles
 
     try:
-        r = requests.get(
-            "https://api.binance.com/api/v3/klines",
+        url = "https://api.binance.com/api/v3/klines"
+
+        response = requests.get(
+            url,
             params={
                 "symbol": symbol,
                 "interval": INTERVAL,
                 "limit": 100
             },
-            timeout=10
+            timeout=15
         )
 
-        r.raise_for_status()
-        data = r.json()
+        response.raise_for_status()
+
+        data = response.json()
+
+        if not isinstance(data, list):
+            raise Exception(f"Unexpected Binance response: {data}")
 
         candles = [
             {
@@ -57,10 +76,21 @@ def load_history(symbol):
             for x in data
         ]
 
-        print(f"Loaded {len(candles)} candles for {symbol}")
+        print(
+            f"[HISTORY] Loaded {len(candles)} candles for {symbol}",
+            flush=True
+        )
+
+        send_chat(
+            f"{symbol} • Loaded {len(candles)} historical candles"
+        )
+
+        return True
 
     except Exception as e:
-        print("History error:", e)
+        print("[HISTORY ERROR]", repr(e), flush=True)
+        send_chat(f"{symbol} • History error: {e}")
+        return False
 
 
 def ema(values, period):
@@ -71,9 +101,7 @@ def ema(values, period):
     multiplier = 2 / (period + 1)
 
     for price in values[period:]:
-        value = (
-            price - value
-        ) * multiplier + value
+        value = (price - value) * multiplier + value
 
     return value
 
@@ -89,7 +117,6 @@ def analyse():
 
     fast = ema(closes, 9)
     slow = ema(closes, 20)
-
     last = closes[-1]
 
     if fast is None or slow is None:
@@ -104,7 +131,7 @@ def analyse():
             "reason": "EMA 9 above EMA 20"
         }
 
-    if fast < slow and last < fast:
+    if fast < slow and last < slow:
         return {
             "signal": "DOWN",
             "reason": "EMA 9 below EMA 20"
@@ -117,30 +144,22 @@ def analyse():
 
 
 def send_state():
-    if not candles:
-        return
-
     result = analyse()
 
-    socketio.emit(
-        "market_data",
-        {
-            "symbol": SYMBOL,
-            "candles": candles[-100:],
-            "signal": result["signal"],
-            "reason": result["reason"]
-        }
+    payload = {
+        "symbol": SYMBOL,
+        "candles": candles[-100:],
+        "signal": result["signal"],
+        "reason": result["reason"]
+    }
+
+    print(
+        f"[STATE] {SYMBOL} candles={len(candles)} "
+        f"signal={result['signal']}",
+        flush=True
     )
 
-
-def send_chat(message):
-    socketio.emit(
-        "trading_chat",
-        {
-            "time": int(time.time() * 1000),
-            "message": message
-        }
-    )
+    socketio.emit("market_data", payload)
 
 
 def on_message(ws_app, message):
@@ -148,6 +167,7 @@ def on_message(ws_app, message):
 
     try:
         data = json.loads(message)
+
         k = data.get("k")
 
         if not k:
@@ -170,31 +190,43 @@ def on_message(ws_app, message):
         if len(candles) > 100:
             candles = candles[-100:]
 
-        result = analyse()
-
         send_state()
 
         if k["x"]:
+            result = analyse()
+
             send_chat(
                 f"{SYMBOL} • Candle closed • "
                 f"{result['signal']} • {result['reason']}"
             )
 
     except Exception as e:
-        print("WebSocket message error:", e)
+        print("[MESSAGE ERROR]", repr(e), flush=True)
 
 
 def on_error(ws_app, error):
-    print("WebSocket error:", error)
+    print("[BINANCE WS ERROR]", repr(error), flush=True)
+    send_chat(f"{SYMBOL} • Binance WebSocket error: {error}")
 
 
 def on_close(ws_app, code, message):
-    print("WebSocket closed")
+    print(
+        f"[BINANCE WS CLOSED] code={code} message={message}",
+        flush=True
+    )
+
+    send_chat(f"{SYMBOL} • Binance stream disconnected")
 
 
 def on_open(ws_app):
-    print("WebSocket connected:", SYMBOL)
-    send_chat(f"{SYMBOL} • Live WebSocket connected")
+    print(
+        f"[BINANCE WS CONNECTED] {SYMBOL}",
+        flush=True
+    )
+
+    send_chat(f"{SYMBOL} • Binance live WebSocket connected")
+
+    send_state()
 
 
 def websocket_loop():
@@ -202,12 +234,17 @@ def websocket_loop():
 
     while True:
         try:
+            symbol = SYMBOL.lower()
+
             url = (
                 "wss://stream.binance.com:9443/ws/"
-                f"{SYMBOL.lower()}@kline_{INTERVAL}"
+                f"{symbol}@kline_{INTERVAL}"
             )
 
-            print("Connecting:", url)
+            print(
+                f"[BINANCE CONNECTING] {url}",
+                flush=True
+            )
 
             ws = websocket.WebSocketApp(
                 url,
@@ -223,9 +260,17 @@ def websocket_loop():
             )
 
         except Exception as e:
-            print("WebSocket connection error:", e)
+            print(
+                "[WEBSOCKET LOOP ERROR]",
+                repr(e),
+                flush=True
+            )
 
-        time.sleep(3)
+            send_chat(
+                f"{SYMBOL} • WebSocket reconnecting..."
+            )
+
+        time.sleep(5)
 
 
 @app.route("/")
@@ -238,7 +283,10 @@ def select_market():
     global SYMBOL, ws
 
     data = request.get_json(silent=True) or {}
-    new_symbol = str(data.get("symbol", "")).upper()
+
+    new_symbol = str(
+        data.get("symbol", "")
+    ).upper()
 
     if new_symbol not in ALLOWED_SYMBOLS:
         return jsonify({
@@ -264,7 +312,24 @@ def select_market():
     })
 
 
+@socketio.on("connect")
+def handle_connect():
+    print(
+        f"[CLIENT CONNECTED] {SYMBOL}",
+        flush=True
+    )
+
+    socketio.emit("trading_chat", {
+        "time": int(time.time() * 1000),
+        "message": "Bot connected to live market stream."
+    })
+
+    send_state()
+
+
 if __name__ == "__main__":
+    print("[SERVER] Starting Live Trading Bot", flush=True)
+
     load_history(SYMBOL)
 
     threading.Thread(
@@ -272,9 +337,13 @@ if __name__ == "__main__":
         daemon=True
     ).start()
 
+    port = int(
+        os.environ.get("PORT", 5000)
+    )
+
     socketio.run(
         app,
         host="0.0.0.0",
-        port=5000,
+        port=port,
         allow_unsafe_werkzeug=True
     )
